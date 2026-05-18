@@ -1,0 +1,32 @@
+name: Generate gost.js
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gen-gost:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/gost-streebog-totp
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install gostcrypto -q
+
+      - run: python3 gen_gost.py
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pwa/gost.js
+          git diff --cached --stat
+          git commit -m "fix(gost.js): correct Streebog-256 T-tables [skip ci]"
+          git push origin feat/gost-streebog-totp
