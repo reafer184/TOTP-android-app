@@ -38,22 +38,14 @@ let qrScanFrame  = null;
 let updateInterval = null;
 
 // ── Platform detection ─────────────────────────────────────────────────────────
-let CapCamera      = null;
-let CapBarcodeScanner = null;
-
 const isCapacitorNative = () =>
   typeof window !== 'undefined' &&
   typeof window.Capacitor !== 'undefined' &&
   window.Capacitor.isNativePlatform();
 
-const loadCapacitorPlugins = async () => {
-  if (!isCapacitorNative()) return;
-  try {
-    const mod = await import('./node_modules/@capacitor/camera/dist/esm/index.js');
-    CapCamera = mod.Camera;
-  } catch {
-    // Plugin not bundled yet — will use getUserMedia fallback
-  }
+const getCapCamera = () => {
+  if (!isCapacitorNative()) return null;
+  return window?.Capacitor?.Plugins?.Camera ?? null;
 };
 
 if ('serviceWorker' in navigator && !isCapacitorNative()) {
@@ -194,70 +186,43 @@ const fillFormFromParsed = (parsed) => {
   setStatus(`QR-код распознан (алгоритм: ${parsed.algorithm})`, 'success');
 };
 
-// ── QR Scanner ─────────────────────────────────────────────────────────────────
+// ── QR Scanner ────────────────────────────────────────────────────────────────
 const scanQrNative = async () => {
-  if (!CapCamera) {
-    setStatus('Нативная камера недоступна, перехожу на веб-режим', 'info');
-    return false;
-  }
+  const Camera = getCapCamera();
+  if (!Camera) { setStatus('Нативная камера недоступна', 'error'); return false; }
   try {
-    const { Camera: CameraResultType, CameraSource } = await import('./node_modules/@capacitor/camera/dist/esm/definitions.js');
-    const photo = await CapCamera.getPhoto({
-      quality:      90,
-      allowEditing: false,
-      resultType:   'base64',
-      source:       CameraSource?.Camera ?? 'CAMERA'
-    });
+    const photo = await Camera.getPhoto({ quality: 90, allowEditing: false, resultType: 'base64', source: 'CAMERA' });
     const base64 = photo.base64String;
     if (!base64) throw new Error('Камера не вернула фото');
     const imgEl = new Image();
-    await new Promise((resolve, reject) => {
-      imgEl.onload = resolve;
-      imgEl.onerror = reject;
-      imgEl.src = `data:image/jpeg;base64,${base64}`;
-    });
+    await new Promise((resolve, reject) => { imgEl.onload = resolve; imgEl.onerror = reject; imgEl.src = `data:image/jpeg;base64,${base64}`; });
     if (typeof BarcodeDetector !== 'undefined') {
-      const detector = new BarcodeDetector({ formats: ['qr_code'] });
-      const codes = await detector.detect(imgEl);
-      if (codes.length > 0) {
-        fillFormFromParsed(parseOtpAuthUri(codes[0].rawValue));
-        return true;
-      }
-      throw new Error('Не удалось распознать QR-код на фото');
+      const codes = await new BarcodeDetector({ formats: ['qr_code'] }).detect(imgEl);
+      if (codes.length > 0) { fillFormFromParsed(parseOtpAuthUri(codes[0].rawValue)); return true; }
+      throw new Error('Не удалось распознать QR-код — попробуйте ещё раз');
     }
-    throw new Error('Для распознавания QR установите приложение через npx cap sync');
-  } catch (e) {
-    setStatus(e.message, 'error');
-    return false;
-  }
+    throw new Error('BarcodeDetector недоступен на этом устройстве');
+  } catch (e) { setStatus(e.message, 'error'); return false; }
 };
 
 const stopQrScanner = () => {
   if (qrScanFrame) { cancelAnimationFrame(qrScanFrame); qrScanFrame = null; }
   if (qrStream) { qrStream.getTracks().forEach(t => t.stop()); qrStream = null; }
   if (els.qrVideo) els.qrVideo.srcObject = null;
-  if (els.qrModal) {
-    els.qrModal.classList.add('hidden');
-    els.qrModal.setAttribute('aria-hidden', 'true');
-  }
+  if (els.qrModal) { els.qrModal.classList.add('hidden'); els.qrModal.setAttribute('aria-hidden', 'true'); }
 };
 
 const startQrScanLoop = async () => {
   if (typeof BarcodeDetector === 'undefined') {
-    setStatus('Сканирование QR не поддерживается в этом браузере — введите секрет вручную', 'error');
-    stopQrScanner();
-    return;
+    setStatus('Сканирование QR не поддерживается — введите секрет вручную', 'error');
+    stopQrScanner(); return;
   }
   const detector = new BarcodeDetector({ formats: ['qr_code'] });
   const tick = async () => {
     if (!els.qrVideo || els.qrVideo.readyState < 2) { qrScanFrame = requestAnimationFrame(tick); return; }
     try {
       const codes = await detector.detect(els.qrVideo);
-      if (codes.length > 0 && codes[0].rawValue) {
-        fillFormFromParsed(parseOtpAuthUri(codes[0].rawValue));
-        stopQrScanner();
-        return;
-      }
+      if (codes.length > 0 && codes[0].rawValue) { fillFormFromParsed(parseOtpAuthUri(codes[0].rawValue)); stopQrScanner(); return; }
     } catch (e) { setStatus(e.message, 'error'); stopQrScanner(); return; }
     qrScanFrame = requestAnimationFrame(tick);
   };
@@ -265,14 +230,8 @@ const startQrScanLoop = async () => {
 };
 
 const openQrScanner = async () => {
-  if (isCapacitorNative()) {
-    await scanQrNative();
-    return;
-  }
-  if (!navigator.mediaDevices?.getUserMedia) {
-    setStatus('Камера недоступна — откройте сайт по HTTPS', 'error');
-    return;
-  }
+  if (isCapacitorNative()) { await scanQrNative(); return; }
+  if (!navigator.mediaDevices?.getUserMedia) { setStatus('Камера недоступна — откройте сайт по HTTPS', 'error'); return; }
   try {
     qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
     els.qrVideo.srcObject = qrStream;
@@ -385,7 +344,6 @@ const importAccounts = async (file) => {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 const init = async () => {
-  await loadCapacitorPlugins();
   await store.init();
 
   if (state.masterPassword) {
